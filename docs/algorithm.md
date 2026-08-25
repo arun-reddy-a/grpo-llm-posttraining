@@ -165,7 +165,49 @@ out of room. Training on that signal teaches brevity rather than correctness.
 Its reward still enters the group baseline — removing it would change the
 effective group size per prompt and break the fixed-`G` reshape.
 
-## 7. References
+## 7. Weight precision is part of the algorithm
+
+GRPO runs at `lr ≈ 1e-6`, two to three orders of magnitude below an SFT run,
+because it is shifting an already-competent policy's distribution rather than
+fitting one. That small learning rate interacts badly with 16-bit weights.
+
+Adam normalizes the gradient, so the size of an update is set by `lr`, not by
+the gradient magnitude:
+
+```
+Δw  =  lr · m̂ / (sqrt(v̂) + eps)   ≈   lr        (m̂/sqrt(v̂) is ~unit scale)
+```
+
+bf16 has an 8-bit mantissa, so near a weight of magnitude `w` the smallest
+representable change is about `w · 2⁻⁸`. For a typical transformer weight
+(`w ≈ 0.02`) that floor is `≈ 1.2e-4` — roughly **100× larger than a 1e-6
+update**. The update does not lose precision; it rounds to exactly zero.
+
+```
+50 AdamW steps at lr=1e-6, w₀ = 0.02:
+    bfloat16 →  mean |Δw| = 0.0            (nothing happened)
+    float32  →  mean |Δw| = 5.0e-5         (as expected)
+```
+
+Nothing in the loss, the reward, or the gradient norm reveals this: gradients
+are computed correctly, `grad_norm` is healthy, the KL stays at zero because the
+policy never moves, and the reward simply never improves. It reads exactly like
+a hyperparameter problem.
+
+The fix is standard mixed precision — **fp32 master weights, bf16 math**:
+`model.torch_dtype: float32` with `model.compute_dtype: bfloat16`, where
+autocast recovers bf16's speed and activation savings while updates accumulate
+in fp32. `Config.validate` rejects 16-bit master weights below `lr = 1e-4`.
+
+LoRA is exempt, for a real reason rather than a convenience: its base weights
+are frozen and never receive an update, so 16-bit storage there is harmless and
+saves several GB. Only the adapters train, and `build_model_and_tokenizer`
+upcasts exactly those to fp32.
+
+Asserted in `tests/test_config.py::TestWeightPrecision`, which pins the numeric
+fact and then checks that no shipped config violates it.
+
+## 8. References
 
 - Shao et al., *DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models* (2024) — introduces GRPO.
 - DeepSeek-AI, *DeepSeek-R1* (2025) — GRPO with rule-based rewards at scale.

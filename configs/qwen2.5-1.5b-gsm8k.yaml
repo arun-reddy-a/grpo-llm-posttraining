@@ -1,10 +1,18 @@
-# Qwen2.5-1.5B-Instruct on GSM8K. Same recipe as the 0.5B config with a
-# smaller micro-batch and a tighter vLLM memory budget -- at 1.5B the policy,
-# its gradients and the Adam state are ~18GB in bf16 before any activations,
-# so on a 24GB card this is close to the ceiling. If it OOMs, the first knob is
-# model.use_lora (which also removes the separate reference model), not a
-# smaller group_size: shrinking the group degrades the baseline that GRPO is
-# built on.
+# Qwen2.5-1.5B-Instruct on GSM8K, full fine-tune. Needs a 48GB card.
+#
+# The budget, for 1.544B parameters with fp32 master weights (see
+# model.torch_dtype -- 16-bit weights silently discard a 1e-6 update):
+#   weights 4B + grads 4B + Adam moments 8B = 16 bytes/param  = 24.7 GB
+#   frozen reference model in bf16                            =  3.1 GB
+#   vLLM engine at gpu_memory_utilization 0.20 of 48GB        =  9.6 GB
+#   activations (micro_batch 2, checkpointing on)             = ~2   GB
+#                                                              --------
+#                                                               ~39 GB
+#
+# This does NOT fit on 24GB. On a 24GB card use the LoRA config instead, which
+# trades the low-rank constraint for dropping both the Adam state and the
+# separate reference model. Do not instead shrink group_size to save memory:
+# that degrades the very baseline GRPO is built on.
 #
 #   grpo train --config configs/qwen2.5-1.5b-gsm8k.yaml
 #
@@ -14,7 +22,8 @@
 
 model:
   name_or_path: Qwen/Qwen2.5-1.5B-Instruct
-  torch_dtype: bfloat16
+  torch_dtype: float32
+  compute_dtype: bfloat16
   attn_implementation: flash_attention_2
   gradient_checkpointing: true
 
@@ -31,7 +40,7 @@ rollout:
   top_p: 1.0
   max_prompt_length: 384
   max_completion_length: 512
-  gpu_memory_utilization: 0.30   # leaves room for policy + grads + Adam state
+  gpu_memory_utilization: 0.20   # leaves room for policy + grads + Adam state
   enforce_eager: false
 
 algo:

@@ -68,6 +68,7 @@ class GRPOTrainer:
         self.rewards = rewards
         self.ref_model = ref_model
         self.device = next(model.parameters()).device
+        self._compute_dtype = _DTYPES.get(config.model.compute_dtype or "")
 
         if config.algo.beta > 0 and ref_model is None and not config.model.use_lora:
             raise ValueError(
@@ -102,6 +103,18 @@ class GRPOTrainer:
             total_steps=config.train.steps,
         )
         self.step = 0
+
+    def _autocast(self):
+        """Run the forward/backward math in ``model.compute_dtype``.
+
+        Master weights stay fp32 so a 1e-6 update survives rounding; autocast is
+        what recovers bf16's speed and activation memory without paying for it
+        in lost updates. A no-op on CPU, where autocast buys nothing and the
+        tests run in fp32 anyway.
+        """
+        if self._compute_dtype is None or self.device.type == "cpu":
+            return nullcontext()
+        return torch.autocast(device_type=self.device.type, dtype=self._compute_dtype)
 
     # ------------------------------------------------------------- main loop
     def train(self) -> None:
@@ -222,14 +235,15 @@ class GRPOTrainer:
         # batch every step.
         old_logps = None
         if cfg.algo.num_inner_epochs > 1:
-            old_logps = batched_logprobs(
-                self.model,
-                input_ids,
-                attention_mask,
-                num_completion_tokens,
-                temperature,
-                micro_batch_size=cfg.optim.micro_batch_size,
-            )
+            with self._autocast():
+                old_logps = batched_logprobs(
+                    self.model,
+                    input_ids,
+                    attention_mask,
+                    num_completion_tokens,
+                    temperature,
+                    micro_batch_size=cfg.optim.micro_batch_size,
+                )
 
         micro = cfg.optim.micro_batch_size
         num_micro = max(1, math.ceil(rollout.num_sequences / micro))
@@ -242,13 +256,14 @@ class GRPOTrainer:
             self.optimizer.zero_grad(set_to_none=True)
             for start in range(0, rollout.num_sequences, micro):
                 sl = slice(start, start + micro)
-                logps = compute_per_token_logprobs(
-                    self.model,
-                    input_ids[sl],
-                    attention_mask[sl],
-                    num_completion_tokens,
-                    temperature,
-                )
+                with self._autocast():
+                    logps = compute_per_token_logprobs(
+                        self.model,
+                        input_ids[sl],
+                        attention_mask[sl],
+                        num_completion_tokens,
+                        temperature,
+                    )
                 loss, part = grpo_policy_loss(
                     per_token_logps=logps,
                     old_per_token_logps=old_logps[sl] if old_logps is not None else logps.detach(),
@@ -297,17 +312,18 @@ class GRPOTrainer:
         micro = self.config.optim.micro_batch_size
 
         if self.ref_model is not None:
-            return batched_logprobs(
-                self.ref_model, input_ids, attention_mask, num_completion_tokens,
-                temperature, micro_batch_size=micro,
-            )
+            with self._autocast():
+                return batched_logprobs(
+                    self.ref_model, input_ids, attention_mask, num_completion_tokens,
+                    temperature, micro_batch_size=micro,
+                )
 
         # LoRA path: the reference policy is the model with its adapters off, so
         # no second set of weights is ever allocated. This is the single largest
         # memory saving available to a single-GPU GRPO run.
         disable = getattr(self.model, "disable_adapter", None)
         context = disable() if callable(disable) else nullcontext()
-        with context:
+        with context, self._autocast():
             return batched_logprobs(
                 self.model, input_ids, attention_mask, num_completion_tokens,
                 temperature, micro_batch_size=micro,
@@ -402,6 +418,14 @@ def build_model_and_tokenizer(config: Config) -> tuple[torch.nn.Module, Any]:
                 task_type="CAUSAL_LM",
             ),
         )
+        # Upcast just the adapters to fp32. The frozen base never receives an
+        # update, so 16-bit storage there is harmless and saves real memory --
+        # but a bf16 adapter loses a 1e-5 update to rounding exactly the way a
+        # bf16 full fine-tune loses a 1e-6 one. This is why model.use_lora is
+        # exempt from the 16-bit check in Config.validate.
+        for param in model.parameters():
+            if param.requires_grad:
+                param.data = param.data.float()
 
     if torch.cuda.is_available():
         model = model.cuda()

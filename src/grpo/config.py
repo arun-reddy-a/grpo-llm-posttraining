@@ -25,6 +25,11 @@ __all__ = ["Config", "ModelConfig", "RolloutConfig", "AlgoConfig", "OptimConfig"
 
 T = TypeVar("T")
 
+# Learning rate below which an AdamW update vanishes into 16-bit weight storage.
+# Derived from bf16's 8-bit mantissa against a typical transformer weight
+# magnitude; see the check in Config.validate.
+_SIXTEEN_BIT_UPDATE_FLOOR = 1e-4
+
 
 def _from_dict(cls: type[T], data: dict[str, Any], path: str) -> T:
     """Build a dataclass from a dict, rejecting unknown keys with context."""
@@ -43,7 +48,18 @@ def _from_dict(cls: type[T], data: dict[str, Any], path: str) -> T:
 @dataclass
 class ModelConfig:
     name_or_path: str = "Qwen/Qwen2.5-0.5B-Instruct"
-    torch_dtype: str = "bfloat16"
+    # Storage dtype for the weights the optimizer updates. fp32 by default, and
+    # that is not a conservative default -- it is a correctness requirement.
+    # bf16 carries an 8-bit mantissa, so the smallest representable change to a
+    # weight of magnitude w is about w * 2^-8 (~4e-5 for a typical transformer
+    # weight). An AdamW step is ~lr in magnitude because Adam normalizes the
+    # gradient, so at GRPO's lr of 1e-6 every single update rounds away and
+    # training silently does nothing at all. See Config.validate.
+    torch_dtype: str = "float32"
+    # Dtype for the forward/backward *math*, applied via torch.autocast. This is
+    # where the bf16 speed and activation-memory savings actually come from;
+    # master weights stay fp32 so the updates survive. None disables autocast.
+    compute_dtype: str | None = "bfloat16"
     attn_implementation: str | None = None
     gradient_checkpointing: bool = True
     trust_remote_code: bool = False
@@ -227,8 +243,37 @@ class Config:
                 f"model.torch_dtype must be one of bfloat16/float16/float32/auto, "
                 f"got {m.torch_dtype!r}"
             )
+        if m.compute_dtype is not None and m.compute_dtype not in (
+            "bfloat16", "float16", "float32"
+        ):
+            raise ValueError(
+                f"model.compute_dtype must be bfloat16/float16/float32 or null, "
+                f"got {m.compute_dtype!r}"
+            )
         if m.use_lora and m.lora_r < 1:
             raise ValueError(f"model.lora_r must be >= 1, got {m.lora_r}")
+
+        # The silent killer: 16-bit master weights at a policy-gradient learning
+        # rate. bf16's relative resolution is 2^-8, so on a weight of magnitude
+        # ~1e-2 the smallest representable step is ~4e-5 -- an update of 1e-6
+        # rounds to exactly zero, and the run trains nothing while every metric
+        # continues to look plausible. LoRA is exempt because its frozen base is
+        # never updated and its adapters are upcast to fp32 at build time.
+        if (
+            not m.use_lora
+            and m.torch_dtype in ("bfloat16", "float16")
+            and o.learning_rate < _SIXTEEN_BIT_UPDATE_FLOOR
+        ):
+            raise ValueError(
+                f"model.torch_dtype={m.torch_dtype!r} stores master weights in 16 bits, "
+                f"whose relative resolution is ~2^-8. An AdamW step is ~lr in magnitude, "
+                f"so at optim.learning_rate={o.learning_rate:g} every update rounds to "
+                f"zero and training silently does nothing.\n"
+                f"Fix: model.torch_dtype='float32' with model.compute_dtype='bfloat16' "
+                f"(fp32 master weights, bf16 math -- the default), or model.use_lora=true. "
+                f"To override deliberately, raise the learning rate above "
+                f"{_SIXTEEN_BIT_UPDATE_FLOOR:g}."
+            )
 
         if r.backend not in ("hf", "vllm"):
             raise ValueError(f"rollout.backend must be 'hf' or 'vllm', got {r.backend!r}")

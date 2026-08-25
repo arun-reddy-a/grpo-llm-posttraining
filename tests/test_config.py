@@ -152,3 +152,74 @@ class TestDerived:
             ).needs_reference_model
             is False
         )
+
+
+class TestWeightPrecision:
+    """Guards the defect that 16-bit master weights silently discard GRPO updates.
+
+    This is the failure the rest of the suite could not see: the toy policy in
+    ``test_trainer.py`` is fp32 at a large learning rate, so it trains happily
+    while a real bf16 recipe at 1e-6 would not move a single weight.
+    """
+
+    def test_a_policy_gradient_update_vanishes_in_bfloat16(self):
+        """The numeric fact the validation rule is derived from.
+
+        bf16 carries an 8-bit mantissa, so near a weight of magnitude 0.02 the
+        smallest representable change is ~1.2e-4. An AdamW step is ~lr in size
+        because Adam normalizes the gradient, so at lr=1e-6 the update is two
+        orders of magnitude too small to land and rounds to exactly zero.
+        """
+        import torch
+
+        moved = {}
+        for dtype in (torch.bfloat16, torch.float32):
+            param = torch.nn.Parameter(torch.full((256,), 0.02, dtype=dtype))
+            optimizer = torch.optim.AdamW([param], lr=1e-6, betas=(0.9, 0.99))
+            start = param.detach().clone().float()
+            for _ in range(50):
+                optimizer.zero_grad()
+                param.grad = torch.full_like(param, 1e-3)
+                optimizer.step()
+            moved[dtype] = (param.detach().float() - start).abs().mean().item()
+
+        assert moved[torch.bfloat16] == 0.0, "bf16 should lose the update entirely"
+        assert moved[torch.float32] > 1e-6, "fp32 should accumulate it"
+
+    def test_sixteen_bit_full_finetune_at_grpo_lr_is_rejected(self):
+        for dtype in ("bfloat16", "float16"):
+            with pytest.raises(ValueError, match="rounds to zero"):
+                Config.from_dict({"model": {"torch_dtype": dtype}})
+
+    def test_the_error_names_both_ways_out(self):
+        with pytest.raises(ValueError, match="use_lora"):
+            Config.from_dict({"model": {"torch_dtype": "bfloat16"}})
+
+    def test_sixteen_bit_is_allowed_at_a_learning_rate_that_lands(self):
+        config = Config.from_dict(
+            {"model": {"torch_dtype": "bfloat16"}, "optim": {"learning_rate": 1e-3}}
+        )
+        assert config.model.torch_dtype == "bfloat16"
+
+    def test_lora_is_exempt_because_its_adapters_are_upcast(self):
+        config = Config.from_dict(
+            {"model": {"torch_dtype": "bfloat16", "use_lora": True}}
+        )
+        assert config.model.torch_dtype == "bfloat16"
+
+    def test_the_default_recipe_is_safe(self):
+        """fp32 master weights, bf16 math -- the combination that actually trains."""
+        assert Config().model.torch_dtype == "float32"
+        assert Config().model.compute_dtype == "bfloat16"
+
+    @pytest.mark.parametrize("path", sorted(CONFIG_DIR.glob("*.yaml")), ids=lambda p: p.name)
+    def test_no_shipped_config_silently_discards_its_updates(self, path):
+        config = Config.from_yaml(path)
+        assert config.model.use_lora or config.model.torch_dtype not in ("bfloat16", "float16")
+
+    def test_invalid_compute_dtype_is_rejected(self):
+        with pytest.raises(ValueError, match="compute_dtype must be"):
+            Config.from_dict({"model": {"compute_dtype": "int8"}})
+
+    def test_compute_dtype_may_be_disabled(self):
+        assert Config.from_dict({"model": {"compute_dtype": None}}).model.compute_dtype is None

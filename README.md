@@ -12,7 +12,7 @@ are not the parts a wrapper exposes: which logit position predicts which token,
 what the loss denominator should be under gradient accumulation, whether the
 sampler's weights are still the policy's weights. Those decisions live in
 `src/grpo/algo.py` and `src/grpo/logprobs.py`, depend on nothing but `torch`, and
-are covered by **229 tests that run on CPU with no network access**.
+are covered by **241 tests that run on CPU with no network access**.
 
 ```
                     ┌─────────────────────────────────────────────┐
@@ -76,6 +76,7 @@ Full derivations, including the `k3` KL estimator and the length-bias analysis:
 | **`old` log probs** | Skipped when `num_inner_epochs == 1` | With one inner epoch no optimizer step happens between sampling and the loss, so `π_old` *is* `π_θ` and `ρ ≡ 1` exactly. Taking `old` from the detached current log probs is exact, not an approximation, and saves a full forward pass per step. Consequence: `clip_frac` is `0.0` by construction on-policy — expected, not a bug. |
 | **EOS in the mask** | Included | Stopping is an action the policy chose. Excluded from the loss, the model is never reinforced for *ending* a correct answer — a documented path to completions that ramble into the token budget. |
 | **Truncated completions** | Masked from the loss by default | A completion cut off at the budget is graded wrong by any answer extractor, but it was not necessarily reasoning wrong — it ran out of room. Training on that signal teaches brevity, not correctness. Its reward still enters the group baseline; removing it would change the effective group size per prompt. |
+| **Weight precision** | fp32 master weights, bf16 *math* via autocast | The one that nearly shipped broken. bf16 has an 8-bit mantissa, so the smallest representable change to a weight of magnitude ~0.02 is ~1.2e-4 — while an AdamW step is ~`lr` in size because Adam normalizes the gradient. At GRPO's `lr=1e-6` **every update rounds to exactly zero and the run trains nothing**, with every logged metric still looking plausible. `torch_dtype` (storage) is now separate from `compute_dtype` (autocast), and config validation rejects 16-bit master weights below `lr=1e-4`. LoRA is exempt: its base is frozen and its adapters are upcast to fp32. |
 | **Temperature** | Applied to logits before `log_softmax` | The ratio is only a valid importance weight against the *sampling* distribution. Forgetting this is silent: the loss stays finite and plausible while optimizing a different objective. Config validation also rejects `temperature: 0` — greedy decoding makes every sample in a group identical, hence zero variance and no signal. |
 
 ### Systems
@@ -112,7 +113,7 @@ ways a neural RM is, and testable without a GPU.
 
 ## What is tested, and what that buys
 
-229 tests, CPU-only, no network, no model downloads — so CI runs **everything**,
+241 tests, CPU-only, no network, no model downloads — so CI runs **everything**,
 not a compile-only subset.
 
 | File | Tests | Covers |
@@ -123,7 +124,7 @@ not a compile-only subset.
 | `test_logprobs.py` | 21 | The off-by-one — plus a test that a one-position shift *would* be caught — temperature, bf16/fp32 agreement, all three transformers kwarg spellings |
 | `test_masking.py` | 22 | EOS-inclusive masking, multi-EOS chat models, pad-equals-EOS confusion, left/right padding and truncation |
 | `test_rewards.py` | 57 | Extraction precedence, numeric equivalence, format hacking, `None` propagation, registry |
-| `test_config.py` | 38 | Every shipped config parses; typos rejected; each cross-field coherence rule |
+| `test_config.py` | 50 | Every shipped config parses; typos rejected; each cross-field coherence rule; the 16-bit weight-precision guard |
 | `test_data.py` | 24 | Chat templating, JSONL errors that name the line, sampler determinism and epoch wraparound |
 | `test_trainer.py` | 17 | **The real trainer loop** against a tiny in-memory policy |
 
@@ -157,8 +158,44 @@ src/grpo/
 └── utils/               seeding, LR schedules, JSONL/W&B metric logging
 configs/                 smoke · Qwen2.5-0.5B · Qwen2.5-1.5B · 1.5B-LoRA
 docs/algorithm.md        derivations: the baseline, k3, clipping, length bias
-tests/                   229 CPU-only tests
+tests/                   241 CPU-only tests
 ```
+
+## Hardware
+
+Memory is dominated by three things that must coexist on the card: the training
+state, the frozen reference model, and the vLLM engine's weights plus KV cache.
+Per trainable parameter, full fine-tuning costs **16 bytes** — 4 (fp32 weights)
++ 4 (fp32 grads) + 8 (Adam's two fp32 moments). Parameter counts below are
+computed from each model's published architecture, not estimated.
+
+| Config | Model | Train state | Ref model | vLLM | Total | Card |
+|---|---|---|---|---|---|---|
+| `smoke.yaml` | SmolLM2-135M (0.135B) | 2.2 GB | 0.3 GB | — (HF backend) | ~3 GB | any 8GB GPU, or CPU |
+| `qwen2.5-0.5b-gsm8k.yaml` | Qwen2.5-0.5B (0.494B) | 7.9 GB | 1.0 GB | 8.4 GB | ~19 GB | **24GB** — RTX 3090/4090, L4, A10G |
+| `qwen2.5-1.5b-gsm8k-lora.yaml` | Qwen2.5-1.5B (1.544B) | 3.7 GB | 0 GB | 10.8 GB | ~17 GB | **24GB** |
+| `qwen2.5-1.5b-gsm8k.yaml` | Qwen2.5-1.5B (1.544B) | 24.7 GB | 3.1 GB | 9.6 GB | ~39 GB | **48GB** — A6000, L40S, A100 |
+
+Two rows are worth reading against each other. The LoRA config trains a 1.5B
+model on the same card as the 0.5B full fine-tune, because `r=32` on the seven
+projection modules is 36.9M of 1.544B parameters (2.4%) — shrinking the Adam
+state ~42× — *and* because the reference model disappears entirely when `π_ref`
+is just the policy with its adapters switched off.
+
+**Other requirements**
+
+- **CUDA** for the vLLM backend (Linux only). The HF backend needs no GPU at all
+  and runs on CPU, which is what makes `configs/smoke.yaml` usable anywhere.
+- **Apple Silicon is CPU-only here.** The trainer checks `torch.cuda.is_available()`
+  and does not use MPS, so an M-series Mac runs the tests fine and the smoke
+  config slowly, but is not a training machine.
+- **Disk**: a few GB for model weights and the HF cache.
+- **No GPU needed for the test suite** — `pytest -q` is CPU-only and takes about
+  a minute.
+
+If you are renting: a single 24GB instance covers everything except the 1.5B
+full fine-tune, and the LoRA config is the better first run regardless — it
+reaches a larger model on smaller hardware.
 
 ## Usage
 
@@ -231,7 +268,7 @@ not actually measured on the claimed setup is not worth including, and there is
 no way to run a 0.5B model through 500 GRPO steps on CPU to get one honestly.
 
 What *is* verified, on every commit and reproducible in under a minute:
-229 tests covering the advantage estimator, the KL estimator, the clipped loss,
+241 tests covering the advantage estimator, the KL estimator, the clipped loss,
 log-prob alignment, masking, rewards, config validation, and the real trainer
 loop end to end — including that rewarded completions become more likely.
 
@@ -256,8 +293,8 @@ solutions the base model could already reach, rather than teaching new ones.)*
 ## Scope and limitations
 
 - **Single GPU.** No FSDP/DeepSpeed sharding and no multi-node rollout. The
-  memory ceiling is roughly a 1.5B policy in bf16 on 24GB with full fine-tuning,
-  or larger with `use_lora: true`.
+  practical ceiling is a 0.5B full fine-tune or a 1.5B LoRA run on 24GB, and a
+  1.5B full fine-tune on 48GB — see [Hardware](#hardware).
 - **Rule-based rewards only.** No reward model, no preference data. That is a
   deliberate fit to verifiable-answer tasks (math, code, structured extraction);
   open-ended generation would need a different reward source, which is what the

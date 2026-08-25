@@ -2,12 +2,22 @@
 #
 #   grpo train --config configs/qwen2.5-1.5b-gsm8k-lora.yaml
 #
-# Two savings, not one. The obvious saving is the optimizer state -- Adam holds
-# two moments per *trainable* parameter, so training ~0.5% of the weights cuts
-# that by ~200x. The less obvious and equally large saving is the reference
-# model: with adapters, pi_ref is just the policy with the adapters switched
-# off, so the KL term costs a context manager instead of a second full copy of
-# the weights on the GPU. See GRPOTrainer._reference_logprobs.
+# Two savings, not one. The obvious one is the optimizer state: Adam holds two
+# moments per *trainable* parameter, and r=32 on the seven projection modules is
+# 36.9M of 1.544B parameters (2.4%), so the Adam state shrinks ~42x. The less
+# obvious and comparably large saving is the reference model -- with adapters,
+# pi_ref is just the policy with them switched off, so the KL term costs a
+# context manager instead of a second full copy of the weights on the GPU.
+# See GRPOTrainer._reference_logprobs.
+#
+# Budget on a 24GB card:
+#   frozen base in bf16 (never updated, so 16-bit is safe here) =  3.1 GB
+#   fp32 adapters + grads + Adam (36.9M x 16B)                  =  0.6 GB
+#   reference model                                             =  0    GB
+#   vLLM at gpu_memory_utilization 0.45 of 24GB                 = 10.8 GB
+#   activations                                                 = ~2   GB
+#                                                                --------
+#                                                                 ~17 GB
 #
 # The trade: a low-rank update is a smaller hypothesis class, and the vLLM sync
 # has to merge the adapters into the base weights on every step (a real cost
@@ -15,7 +25,8 @@
 
 model:
   name_or_path: Qwen/Qwen2.5-1.5B-Instruct
-  torch_dtype: bfloat16
+  torch_dtype: bfloat16    # safe here: the base is frozen; adapters are
+                           # upcast to fp32 in build_model_and_tokenizer
   attn_implementation: flash_attention_2
   gradient_checkpointing: true
   use_lora: true
