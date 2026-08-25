@@ -1,0 +1,15 @@
+# Full training environment. For the numerics + test suite alone, `torch` and
+# `pyyaml` are sufficient -- see requirements-dev.txt.
+torch>=2.1
+pyyaml>=6.0
+transformers>=4.45
+datasets>=2.20
+accelerate>=0.30
+peft>=0.12
+
+# vLLM is Linux/CUDA-only. Install it separately on a GPU box:
+#   pip install vllm>=0.6
+# The HF rollout backend (rollout.backend: hf) runs everywhere without it.
+
+# Optional experiment tracking
+# wandb>=0.17

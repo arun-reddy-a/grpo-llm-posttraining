@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grpo-llm-posttraining"
+version = "0.1.0"
+description = "From-scratch Group Relative Policy Optimization (GRPO) for LLM post-training"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Arun Reddy" }]
+keywords = ["grpo", "rlhf", "llm", "post-training", "reinforcement-learning", "vllm"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The core dependency set is deliberately tiny: grpo.algo and grpo.logprobs --
+# the parts worth testing -- need nothing but torch. transformers, datasets and
+# vLLM are extras so the test suite runs on a CPU CI box in under a minute.
+dependencies = ["torch>=2.1", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+train = ["transformers>=4.45", "datasets>=2.20", "accelerate>=0.30"]
+vllm = ["vllm>=0.6"]
+peft = ["peft>=0.12"]
+logging = ["wandb>=0.17"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+all = [
+  "transformers>=4.45", "datasets>=2.20", "accelerate>=0.30",
+  "vllm>=0.6", "peft>=0.12", "wandb>=0.17", "pytest>=8.0", "ruff>=0.6",
+]
+
+[project.scripts]
+grpo = "grpo.cli:main"
+
+[project.urls]
+Repository = "https://github.com/arun-reddy-a/grpo-llm-posttraining"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "B008"]

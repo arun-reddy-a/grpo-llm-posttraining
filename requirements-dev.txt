@@ -1,0 +1,7 @@
+# Everything needed to run the test suite. No transformers, no datasets, no
+# network: the tests cover grpo.algo, grpo.logprobs, grpo.rewards, grpo.data
+# and grpo.config, all of which are torch-and-stdlib only by design.
+torch>=2.1
+pyyaml>=6.0
+pytest>=8.0
+ruff>=0.6

@@ -1,0 +1,46 @@
+name: ci
+
+# The test suite is CPU-only and offline by design: grpo.algo, grpo.logprobs,
+# grpo.rewards, grpo.data and grpo.config depend on nothing but torch and the
+# standard library, and the trainer integration tests drive the real training
+# loop against a tiny in-memory policy. That means CI genuinely runs everything
+# a GitHub runner can run -- there is no "compile-only" caveat here.
+#
+# What CI cannot cover: the vLLM backend (needs a CUDA GPU) and the
+# transformers model-loading path (needs a model download). Those are exercised
+# by scripts/smoke_test.sh on a real machine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install CPU-only dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -r requirements-dev.txt
+          pip install -e . --no-deps
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Test
+        run: pytest -q

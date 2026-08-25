@@ -1,0 +1,66 @@
+# The memory-constrained variant: LoRA adapters instead of full fine-tuning.
+#
+#   grpo train --config configs/qwen2.5-1.5b-gsm8k-lora.yaml
+#
+# Two savings, not one. The obvious saving is the optimizer state -- Adam holds
+# two moments per *trainable* parameter, so training ~0.5% of the weights cuts
+# that by ~200x. The less obvious and equally large saving is the reference
+# model: with adapters, pi_ref is just the policy with the adapters switched
+# off, so the KL term costs a context manager instead of a second full copy of
+# the weights on the GPU. See GRPOTrainer._reference_logprobs.
+#
+# The trade: a low-rank update is a smaller hypothesis class, and the vLLM sync
+# has to merge the adapters into the base weights on every step (a real cost
+# per step, though still far cheaper than a full-weight copy).
+
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+  torch_dtype: bfloat16
+  attn_implementation: flash_attention_2
+  gradient_checkpointing: true
+  use_lora: true
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.0
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+rollout:
+  backend: vllm
+  group_size: 8
+  prompts_per_step: 8
+  temperature: 1.0
+  max_prompt_length: 384
+  max_completion_length: 512
+  gpu_memory_utilization: 0.45   # more headroom available without Adam's moments
+
+algo:
+  beta: 0.02
+  advantage_mode: group_norm
+  aggregation: token_mean
+  num_inner_epochs: 1
+  mask_truncated_completions: true
+
+optim:
+  # LoRA tolerates -- and needs -- a much higher LR than full fine-tuning: the
+  # update is confined to a low-rank subspace, so 1e-6 barely moves the policy.
+  learning_rate: 1.0e-5
+  max_grad_norm: 1.0
+  scheduler: cosine
+  warmup_ratio: 0.03
+  micro_batch_size: 4
+
+train:
+  steps: 500
+  dataset: gsm8k
+  output_dir: outputs/qwen2.5-1.5b-gsm8k-lora
+  save_every: 100
+  log_completions: 4
+
+rewards:
+  - name: math_correctness
+    weight: 1.0
+  - name: format
+    weight: 0.2
+    strict: true
+  - name: tag_count
+    weight: 0.1

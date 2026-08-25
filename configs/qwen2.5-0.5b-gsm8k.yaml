@@ -1,0 +1,72 @@
+# Reference recipe: Qwen2.5-0.5B-Instruct on GSM8K, single 24GB GPU.
+#
+#   grpo train --config configs/qwen2.5-0.5b-gsm8k.yaml
+#
+# Budget per step: 8 prompts x 8 samples = 64 sequences, up to 640 tokens each.
+# Rollout dominates the step time, which is why the vLLM backend is the default
+# here and the HF backend is left to configs/smoke.yaml.
+
+model:
+  name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+  torch_dtype: bfloat16
+  attn_implementation: flash_attention_2
+  gradient_checkpointing: true
+
+rollout:
+  backend: vllm
+  group_size: 8              # 8-16 is the usual band: below ~4 the group mean
+                             # is too noisy a baseline, above ~16 the extra
+                             # samples mostly buy variance you already had
+  prompts_per_step: 8
+  temperature: 1.0           # 1.0, not 0.7: the ratio is only a correct
+                             # importance weight against the sampling
+                             # distribution, and low temperature also collapses
+                             # within-group diversity, which is the signal
+  top_p: 1.0
+  max_prompt_length: 384
+  max_completion_length: 512
+  gpu_memory_utilization: 0.35   # leaves room for policy + grads + Adam state
+  enforce_eager: false
+
+algo:
+  beta: 0.02                 # small but nonzero: enough to keep the policy near
+                             # the instruct model's language, not so much that
+                             # it cannot move
+  epsilon_low: 0.2
+  epsilon_high: 0.2
+  advantage_mode: group_norm
+  aggregation: token_mean
+  num_inner_epochs: 1        # strictly on-policy; >1 reuses each rollout batch
+                             # and is what makes the clipping term do real work
+  mask_truncated_completions: true
+  filter_zero_variance_groups: false
+
+optim:
+  learning_rate: 1.0e-6
+  weight_decay: 0.0
+  adam_beta2: 0.99
+  max_grad_norm: 1.0
+  scheduler: cosine
+  warmup_ratio: 0.03
+  micro_batch_size: 4        # must divide prompts_per_step * group_size (64)
+
+train:
+  steps: 500
+  dataset: gsm8k
+  dataset_split: train
+  output_dir: outputs/qwen2.5-0.5b-gsm8k
+  save_every: 100
+  log_every: 1
+  log_completions: 4
+  seed: 0
+  # wandb_project: grpo-gsm8k
+
+rewards:
+  - name: math_correctness
+    weight: 1.0              # the only reward carrying task signal -- keep it
+                             # dominant or the model optimizes the tags instead
+  - name: format
+    weight: 0.2
+    strict: true
+  - name: tag_count
+    weight: 0.1              # dense shaping to break the cold-start symmetry

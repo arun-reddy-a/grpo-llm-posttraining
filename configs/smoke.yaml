@@ -1,0 +1,53 @@
+# Smallest end-to-end run that exercises every code path: rollout -> reward ->
+# advantage -> KL-regularized update -> weight sync. Use it to confirm the loop
+# is wired correctly before spending GPU-hours on a real run.
+#
+#   grpo train --config configs/smoke.yaml
+#
+# Deliberately tiny: a 135M model, 4 prompts x 4 samples, 128-token completions,
+# 10 steps. It will not learn anything -- that is not what it is for.
+
+model:
+  name_or_path: HuggingFaceTB/SmolLM2-135M-Instruct
+  torch_dtype: bfloat16
+  gradient_checkpointing: false
+
+rollout:
+  backend: hf              # no vLLM dependency for the smoke path
+  group_size: 4
+  prompts_per_step: 4
+  temperature: 1.0
+  max_prompt_length: 256
+  max_completion_length: 128
+  generation_batch_size: 8
+
+algo:
+  beta: 0.02
+  advantage_mode: group_norm
+  aggregation: token_mean
+  num_inner_epochs: 1
+  mask_truncated_completions: true
+
+optim:
+  learning_rate: 1.0e-6
+  micro_batch_size: 4
+  warmup_ratio: 0.0
+  scheduler: constant
+
+train:
+  steps: 10
+  dataset: gsm8k
+  dataset_limit: 64
+  output_dir: outputs/smoke
+  save_every: 0
+  log_every: 1
+  log_completions: 2
+
+rewards:
+  - name: math_correctness
+    weight: 1.0
+  - name: format
+    weight: 0.2
+    strict: true
+  - name: tag_count
+    weight: 0.1
