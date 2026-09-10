@@ -241,6 +241,12 @@ def aggregate_per_token_loss(
 
 
 def _denom(normalizer: float, like: torch.Tensor) -> torch.Tensor:
+    """`normalizer` as a tensor matching `like`'s dtype/device, floored at 1.
+
+    The floor guards a batch where every token happens to be masked (e.g. a
+    micro-batch whose whole group got filtered by
+    `filter_zero_variance_groups`) from dividing by zero.
+    """
     return torch.tensor(float(normalizer), dtype=like.dtype, device=like.device).clamp(min=1.0)
 
 
@@ -309,9 +315,16 @@ def grpo_policy_loss(
     mask = completion_mask.to(per_token_logps.dtype)
     adv = advantages.to(per_token_logps.dtype).unsqueeze(1)
 
+    # rho_it = exp(log pi_theta - log pi_old); adv broadcasts [N,1] -> [N,T]
+    # since every token of a rollout shares its sequence-level advantage.
     ratio = torch.exp(per_token_logps - old_per_token_logps)
     unclipped = ratio * adv
     clipped = torch.clamp(ratio, 1.0 - epsilon_low, 1.0 + epsilon_high) * adv
+    # PPO's pessimistic bound: min() picks whichever term is *worse* for the
+    # objective, so a positive-advantage token stops helping once the ratio
+    # clears 1+eps_hi, and a negative-advantage token stops hurting once the
+    # ratio drops below 1-eps_lo -- both stop the update from overreacting to
+    # a single off-policy sample.
     per_token_objective = torch.min(unclipped, clipped)
 
     metrics: dict[str, float] = {}
@@ -347,4 +360,10 @@ def grpo_policy_loss(
 
 
 def _masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Mean of `x` over positions where `mask` is 1, ignoring padding/masked tokens.
+
+    Used only for the logged metrics below (kl, clip_frac, ratio_mean), never
+    for the loss itself -- the loss goes through aggregate_per_token_loss,
+    which supports the global-normalizer path gradient accumulation needs.
+    """
     return (x * mask).sum() / mask.sum().clamp(min=1.0)

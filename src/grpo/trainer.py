@@ -39,6 +39,9 @@ from .utils.seed import set_seed
 
 __all__ = ["GRPOTrainer"]
 
+# "auto" maps to None so callers can pass it straight through to `**kwargs`
+# and let transformers/torch.autocast pick the dtype themselves, rather than
+# this module hard-coding a default that would drift from theirs over time.
 _DTYPES = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
@@ -147,6 +150,9 @@ class GRPOTrainer:
         group_size = rollout.group_size
 
         # ---- 2. rewards ----------------------------------------------------
+        # `columns` is one value per prompt; the rollout is one row per sample,
+        # group_size samples per prompt. Repeat each column value group_size
+        # times so row i of `expanded` lines up with row i of the rollout batch.
         expanded = {k: [v for v in values for _ in range(group_size)] for k, values in columns.items()}
         reward_batch = self.rewards(rollout.prompts, rollout.completions, **expanded)
         rewards = torch.tensor(reward_batch.total, dtype=torch.float32, device=self.device)
@@ -246,6 +252,9 @@ class GRPOTrainer:
                 )
 
         micro = cfg.optim.micro_batch_size
+        # Sequences are chunked into micro-batches purely to bound peak
+        # activation memory; `normalizer` above is what keeps the accumulated
+        # loss identical to a single full-batch call regardless of `micro`.
         num_micro = max(1, math.ceil(rollout.num_sequences / micro))
         num_updates = cfg.algo.num_inner_epochs
         accumulated: dict[str, float] = {}

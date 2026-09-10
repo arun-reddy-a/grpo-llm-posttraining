@@ -262,17 +262,16 @@ Metrics worth watching, and what they mean when they move:
 
 ## Results
 
-This repository was developed and tested on a machine with **no NVIDIA GPU**, so
-**no GSM8K accuracy numbers are asserted here**. A resume-facing number that was
-not actually measured on the claimed setup is not worth including, and there is
-no way to run a 0.5B model through 500 GRPO steps on CPU to get one honestly.
+No GSM8K accuracy numbers are asserted here — a resume-facing number that was
+not actually measured is not worth including, so this table stays empty until
+a real run has populated it.
 
 What *is* verified, on every commit and reproducible in under a minute:
 241 tests covering the advantage estimator, the KL estimator, the clipped loss,
 log-prob alignment, masking, rewards, config validation, and the real trainer
 loop end to end — including that rewarded completions become more likely.
 
-To fill this section in on a GPU box:
+To fill this section in:
 
 ```bash
 scripts/train_gsm8k.sh configs/qwen2.5-0.5b-gsm8k.yaml outputs/run1

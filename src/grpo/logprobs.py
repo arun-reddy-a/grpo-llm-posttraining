@@ -121,9 +121,13 @@ def compute_per_token_logprobs(
         kwargs[kwarg_name] = keep
 
     logits = model(**kwargs).logits
+    # If the model understood the trim kwarg it already returned only `keep`
+    # positions; otherwise (or if it silently ignored the kwarg) it returned
+    # logits for the full sequence and we slice the tail ourselves -- correct
+    # either way, just more memory when the kwarg isn't honored.
     if kwarg_name is None or logits.shape[1] != keep:
         logits = logits[:, -keep:, :]
-    logits = logits[:, :-1, :]
+    logits = logits[:, :-1, :]  # drop the position predicting past the sequence end
 
     completion_ids = input_ids[:, -num_completion_tokens:]
     if temperature != 1.0:

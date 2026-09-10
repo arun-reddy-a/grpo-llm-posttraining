@@ -85,6 +85,10 @@ class VLLMRolloutEngine(RolloutEngine):
             dtype=dtype,
             trust_remote_code=trust_remote_code,
             seed=seed,
+            # GRPO samples group_size completions from the *same* prompt every
+            # step, so caching its KV prefix turns G-1 of every G prefills into
+            # cache hits -- the main reason `n=group_size` sampling (below) is
+            # cheap rather than G independent generate calls.
             enable_prefix_caching=True,
         )
         self._eos_ids = _eos_token_ids(tokenizer)
