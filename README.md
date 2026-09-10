@@ -262,32 +262,7 @@ Metrics worth watching, and what they mean when they move:
 
 ## Results
 
-No GSM8K accuracy numbers are asserted here — a resume-facing number that was
-not actually measured is not worth including, so this table stays empty until
-a real run has populated it.
-
-What *is* verified, on every commit and reproducible in under a minute:
-241 tests covering the advantage estimator, the KL estimator, the clipped loss,
-log-prob alignment, masking, rewards, config validation, and the real trainer
-loop end to end — including that rewarded completions become more likely.
-
-To fill this section in:
-
-```bash
-scripts/train_gsm8k.sh configs/qwen2.5-0.5b-gsm8k.yaml outputs/run1
-```
-
-and report `eval_before.json` against `eval_after.json` — same split, same
-decoding, same `--limit` — alongside the run's `metrics.jsonl`.
-
-| Model | Steps | GSM8K test acc. (before) | (after) | pass@4 (before → after) |
-|---|---|---|---|---|
-| Qwen2.5-0.5B-Instruct | 500 | | | |
-| Qwen2.5-1.5B-Instruct | 500 | | | |
-
-*(Greedy decoding for accuracy; `--k 4` at T=0.7 for pass@4. Expect accuracy to
-move considerably more than pass@4 — GRPO mostly sharpens the policy onto
-solutions the base model could already reach, rather than teaching new ones.)*
+Under development.
 
 ## Scope and limitations
 
