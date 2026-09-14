@@ -77,7 +77,7 @@ def cmd_train(args: argparse.Namespace) -> int:
 def cmd_eval(args: argparse.Namespace) -> int:
     config = _load_config(args)
     from .evaluate import evaluate_model
-    from .trainer import build_model_and_tokenizer
+    from .trainer import _DTYPES, build_model_and_tokenizer
 
     if args.model:
         config.model.name_or_path = args.model
@@ -92,6 +92,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         k=args.k,
         max_prompt_length=config.rollout.max_prompt_length,
+        compute_dtype=_DTYPES.get(config.model.compute_dtype or ""),
     )
     print(f"[grpo] {config.model.name_or_path} on {args.split}: {result}", flush=True)
     if args.output:

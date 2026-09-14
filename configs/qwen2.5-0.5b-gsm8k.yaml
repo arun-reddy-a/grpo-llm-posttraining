@@ -11,7 +11,7 @@ model:
   torch_dtype: float32     # fp32 MASTER weights: a 1e-6 AdamW step is ~100x
                            # below bf16's resolution and would round to zero
   compute_dtype: bfloat16  # ...while the forward/backward math still runs in bf16
-  attn_implementation: flash_attention_2
+  attn_implementation: sdpa
   gradient_checkpointing: true
 
 rollout:

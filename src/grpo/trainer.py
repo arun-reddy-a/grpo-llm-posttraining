@@ -371,7 +371,10 @@ class GRPOTrainer:
             },
             path / "trainer_state.pt",
         )
-        (path / "config.json").write_text(
+        # Not "config.json": save_pretrained above already wrote the HF model
+        # config under that name (needed by AutoConfig/`model_type`); reusing
+        # it here would clobber it and make the checkpoint unloadable.
+        (path / "grpo_config.json").write_text(
             json.dumps(self.config.to_dict(), indent=2, default=str), encoding="utf-8"
         )
         return path

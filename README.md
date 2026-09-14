@@ -262,7 +262,70 @@ Metrics worth watching, and what they mean when they move:
 
 ## Results
 
-Under development.
+`configs/qwen2.5-0.5b-gsm8k.yaml`, 500 steps, single L4 (24GB), via
+`scripts/train_gsm8k.sh`. Held-out accuracy is greedy decoding on 500 GSM8K
+test problems, measured identically before and after -- the only number here
+that isn't training reward.
+
+| | Baseline (Qwen2.5-0.5B-Instruct) | After GRPO (500 steps) | Δ |
+|---|---|---|---|
+| **Held-out accuracy** | 43.4% | **49.6%** | **+6.2 pts** |
+| Mean completion length | 246 tok | 258 tok | stable |
+| Fraction truncated | 1.8% | 2.2% | stable |
+
+<img src="docs/results/eval_before_after.png" width="420" alt="Bar chart: held-out GSM8K accuracy rises from 43.4% before GRPO to 49.6% after 500 steps">
+
+The base model is already instruction-tuned, not a raw pretrained checkpoint,
+so there's less headroom than training from scratch -- treat +6.2 points as
+one run, one seed, suggestive rather than statistically airtight. The
+diagnostics below are what make it credible rather than noise or reward
+hacking, checked in the order [Reading a run](#reading-a-run) recommends.
+
+**Training reward rises, noisily** -- expected, since it's the optimized
+quantity and not evidence of generalization on its own; that's what the
+held-out numbers above are for.
+
+<img src="docs/results/train_reward.png" width="640" alt="Line chart: training reward/total rising from about 0.35 to about 0.55 over 500 steps, noisy">
+
+**Correctness is what's rising, not the format shaping reward** -- the
+reward-hacking check the design table calls out. `math_correctness` (weight
+1.0) carries the total upward; `format` (weight 0.2, strict) stays pinned near
+zero throughout. `tag_count` climbs too, but it's the dense cold-start shaping
+term and expected to move early. Format rising instead of correctness would
+have been the tell.
+
+<img src="docs/results/reward_components.png" width="640" alt="Line chart: math_correctness rising from about 0.35 to 0.55, tag_count rising from 0.1 to 0.4, format flat near zero">
+
+**No length-bias hacking.** Mean length stays flat around 230-260 tokens and
+truncation under ~7% throughout -- no padding out answers, no cutoffs before
+finishing.
+
+<img src="docs/results/length_diagnostics.png" width="760" alt="Two line charts: mean completion length flat around 230-260 tokens, fraction truncated flat under 0.1">
+
+**KL spikes twice, then recovers** -- brief excursions near step 100 and
+step 170 (the second reaching KL≈5) as the policy runs hard from the
+reference before `beta=0.02` pulls it back, settling under 0.1 for the rest of
+training. A spike that doesn't recover is the documented signal to raise
+`beta` or lower the learning rate.
+
+<img src="docs/results/kl.png" width="640" alt="Line chart: KL divergence near zero with two sharp spikes around step 100 and step 170, then settling low">
+
+**Three real bugs surfaced producing these numbers**, all fixed on `main`:
+
+- **vLLM weight-sync failure** (`rollout/vllm_engine.py`) -- newer vLLM runs
+  its engine out-of-process by default, so the driver-process attribute path
+  no longer resolved.
+- **`clip_frac` measured the wrong thing** (`algo.py`) -- the KL term was
+  subtracted before the clip comparison, so it tracked "tokens with nonzero
+  KL" instead of genuine PPO clipping.
+- **Checkpoint save clobbered the HF config** (`trainer.py`) -- the run's own
+  config was written to the same `config.json` `save_pretrained` had just
+  produced, which also masked an eval/train precision mismatch: eval ran
+  greedy decoding in raw fp32 while every training step computed in bf16,
+  enough to make the trained checkpoint loop instead of emitting EOS. The
+  first `eval_after.json` was consequently wrong (100% truncated, length
+  pinned at the 512-token cap); the numbers above are the rerun after the fix
+  (`evaluate.py`), with all 241 tests still green.
 
 ## Scope and limitations
 

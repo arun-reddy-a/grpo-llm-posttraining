@@ -24,10 +24,19 @@ point, not vLLM's 0.9 default, which will OOM the trainer.
 from __future__ import annotations
 
 import gc
+import os
 from collections.abc import Iterable
 from typing import Any
 
 import torch
+
+# Newer vLLM defaults to an out-of-process EngineCore (MPClient), so the
+# driver-process attribute paths below no longer resolve -- the model isn't in
+# this process's memory. This repo's design is colocated/same-process by
+# construction, so force the in-process engine the sync below depends on.
+# Must be set before `LLM(...)` is constructed; setdefault so an explicit
+# override wins.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 from .base import RolloutBatch, RolloutEngine, completion_mask_from_ids, pad_and_stack
 

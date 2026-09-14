@@ -325,15 +325,16 @@ def grpo_policy_loss(
     # clears 1+eps_hi, and a negative-advantage token stops hurting once the
     # ratio drops below 1-eps_lo -- both stop the update from overreacting to
     # a single off-policy sample.
-    per_token_objective = torch.min(unclipped, clipped)
+    clipped_surrogate = torch.min(unclipped, clipped)
 
     metrics: dict[str, float] = {}
     if beta != 0.0:
         assert ref_per_token_logps is not None
         kl = kl_divergence_k3(per_token_logps, ref_per_token_logps)
-        per_token_objective = per_token_objective - beta * kl
+        per_token_objective = clipped_surrogate - beta * kl
         metrics["kl"] = _masked_mean(kl, mask).item()
     else:
+        per_token_objective = clipped_surrogate
         metrics["kl"] = 0.0
 
     loss = aggregate_per_token_loss(
@@ -341,12 +342,11 @@ def grpo_policy_loss(
     )
 
     with torch.no_grad():
-        # "clipped" here means the clip actually bound -- i.e. min() selected
-        # the clipped branch and the token's gradient was zeroed. With a single
-        # inner epoch and old == current, ratio is exactly 1 and this is 0.0 by
-        # construction; a nonzero value is only meaningful once the policy has
-        # drifted from the sampler.
-        was_clipped = (per_token_objective < unclipped).to(mask.dtype)
+        # Compared pre-KL: KL (k3) is always >=0, so comparing the post-KL
+        # objective would flag nearly every nonzero-KL token as "clipped"
+        # instead of measuring real ratio clipping. At num_inner_epochs=1,
+        # old == current so ratio == 1 and this is 0.0 by construction.
+        was_clipped = (clipped_surrogate < unclipped).to(mask.dtype)
         metrics.update(
             {
                 "loss": loss.item(),

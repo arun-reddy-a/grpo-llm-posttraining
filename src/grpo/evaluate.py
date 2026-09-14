@@ -11,6 +11,7 @@ sampled from, measured the same way before and after training.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +58,7 @@ def evaluate_model(
     k: int = 1,
     temperature: float = 0.7,
     max_prompt_length: int = 512,
+    compute_dtype: torch.dtype | None = None,
 ) -> EvalResult:
     """Score ``samples`` by exact numeric match on the extracted answer.
 
@@ -66,6 +68,12 @@ def evaluate_model(
     to move accuracy up and pass@k much less, because it mostly sharpens the
     policy onto solutions the base model could already reach rather than
     teaching it new ones.
+
+    ``compute_dtype`` should match training's ``model.compute_dtype`` (see
+    ``GRPOTrainer._autocast``): the policy was optimized entirely under bf16
+    compute, so raw fp32 generation exercises a path GRPO never trained
+    against -- for a sharpened checkpoint this can flip an argmax choice and
+    cascade into a degenerate (repetition-looping) completion.
     """
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
@@ -74,6 +82,11 @@ def evaluate_model(
     model.eval()
     device = next(model.parameters()).device
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    autocast = (
+        torch.autocast(device_type=device.type, dtype=compute_dtype)
+        if compute_dtype is not None and device.type != "cpu"
+        else nullcontext()
+    )
 
     correct_any = 0
     correct_first = 0.0
@@ -93,15 +106,16 @@ def evaluate_model(
             add_special_tokens=False,
         ).to(device)
 
-        outputs = model.generate(
-            **encoded,
-            do_sample=k > 1,
-            temperature=temperature if k > 1 else None,
-            top_p=1.0 if k > 1 else None,
-            num_return_sequences=k,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=pad_id,
-        )
+        with autocast:
+            outputs = model.generate(
+                **encoded,
+                do_sample=k > 1,
+                temperature=temperature if k > 1 else None,
+                top_p=1.0 if k > 1 else None,
+                num_return_sequences=k,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=pad_id,
+            )
         completions = tokenizer.batch_decode(
             outputs[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
         )
